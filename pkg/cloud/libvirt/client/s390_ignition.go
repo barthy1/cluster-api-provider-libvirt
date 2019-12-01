@@ -43,7 +43,39 @@ func setIgnitionForS390X(domainDef *libvirtxml.Domain, client *libvirtClient, ig
 
 	glog.Infof("Ignition: %+v", ignitionDef)
 
-	ignitionVolumeName, err := ignitionDef.createAndUpload(client)
+	ignFile, err := ignitionDef.createFile()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Remove the tmp ignition file
+		if err = os.Remove(ignFile); err != nil {
+			glog.Infof("Error while removing tmp Ignition file: %s", err)
+		}
+	}()
+
+	isoVolumeFile, err := createIgnitionISO(ignitionDef.Name, ignFile)
+	if err != nil {
+		return fmt.Errorf("Error generate iso file: %s", err)
+	}
+
+	img, err := newImage(isoVolumeFile)
+	if err != nil {
+		return err
+	}
+
+	size, err := img.size()
+	if err != nil {
+		return err
+	}
+
+	volumeDef := newDefVolume(ignitionDef.Name)
+	volumeDef.Capacity.Unit = "B"
+	volumeDef.Capacity.Value = size
+	volumeDef.Target.Format.Type = "raw"
+
+	ignitionVolumeName, err := uploadVolume(ignitionDef.PoolName, client, volumeDef, img)
+
 	if err != nil {
 		return err
 	}
@@ -53,10 +85,9 @@ func setIgnitionForS390X(domainDef *libvirtxml.Domain, client *libvirtClient, ig
 	if err != nil {
 		return err
 	}
+
 	domainDef.Devices.Disks = append(domainDef.Devices.Disks, disk)
 
-	// _fw_cfg isn't supported on s390x, so we use guestfish to inject the ignition for now
-	//return injectIgnitionByGuestfish(domainDef, ignitionVolumeName)
 	return nil
 }
 
@@ -81,18 +112,10 @@ func newDiskForConfigDrive(virConn *libvirt.Connect, volumeKey string) (libvirtx
 	if err != nil {
 		return disk, fmt.Errorf("Error retrieving volume file: %s", err)
 	}
-	ignName, err := diskVolume.GetName()
-	if err != nil {
-		return disk, fmt.Errorf("Error get ignition file name: %s", err)
-	}
-	isoVolumeFile, err := ceateIgnitionISO(ignName, diskVolumeFile)
-	if err != nil {
-		return disk, fmt.Errorf("Error generate iso file: %s", err)
-	}
 
 	disk.Source = &libvirtxml.DomainDiskSource{
 		File: &libvirtxml.DomainDiskSourceFile{
-			File: isoVolumeFile,
+			File: diskVolumeFile,
 		},
 	}
 
@@ -100,8 +123,8 @@ func newDiskForConfigDrive(virConn *libvirt.Connect, volumeKey string) (libvirtx
 }
 
 
-// CeateIgnitionISO create config drive iso with ignition-config file
-func ceateIgnitionISO(ignName string, ignPath string) (string, error) {
+// CreateIgnitionISO create config drive iso with ignition-config file
+func createIgnitionISO(ignName string, ignPath string) (string, error) {
 	glog.Infof("DEBUG: ignName %s, ignPath s%", ignName, ignPath)
 	//mkdir -p /tmp/new-drive/openstack/latest
 	err := os.MkdirAll("/tmp/new-drive/openstack/latest", 0755)
